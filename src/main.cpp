@@ -1,5 +1,6 @@
 
 #include <string>
+#include <thread>
 #include <iostream>
 
 #include "conf.h"
@@ -62,6 +63,8 @@ static void redis_connection_checker(evutil_socket_t sock, short which, void * a
 
 void gateway_init_thread(evhtp_t* evhtp, evthr_t* thread, void* arg) {
 
+    srand(time(NULL) + pthread_self());
+
     struct app_info* parent = (struct app_info*)arg;
     struct thread_info* thrd_info = new struct thread_info;
     
@@ -79,19 +82,8 @@ void gateway_init_thread(evhtp_t* evhtp, evthr_t* thread, void* arg) {
     evthr_set_aux(thread, thrd_info);
 }
 
-int main(int argc, char ** argv) {
-
-    std::string cfg_file = "config.json";
-    if(argc > 1) {
-        cfg_file = argv[1];
-    }
+void run_http_service(void) {
     Config& config = Config::instance();
-    if(!config.load(cfg_file)) {
-        std::cerr<<"config init failed "<<cfg_file<<std::endl;
-        return EXIT_FAILURE;
-    }
-
-    srand(time(NULL) + pthread_self());
 
     int http_threads    = config.getThreads();
     std::string baddr   = config.getHttpAddr();
@@ -130,9 +122,110 @@ int main(int argc, char ** argv) {
 #else
 #error 'EVHTP_DISABLE_EVTHR'
 #endif
+
     evhtp_bind_socket(evhtp, baddr.c_str(), bport, backlog);
     event_base_loop(evbase, 0);
+}
 
-    return EXIT_SUCCESS;
-} /* main */
+#include <Ice/Ice.h>
+#include <api_interface.h>
+
+class SrvImpl : public api::idl::Srv {
+public:
+
+    virtual void Call_async(const ::api::idl::AMD_Srv_CallPtr& cb,
+                            const std::string& rqstid,
+                            const std::string& method,
+                            const std::string& rqst,
+                            const ::Ice::Current& = ::Ice::Current()) override {
+        cb->ice_response(true, "{}");
+    }
+};
+
+class IceServer : public Ice::Application {
+public:
+
+    virtual int run(int argc, char* argv[]) {
+
+        std::string cfg_file = "config.json";
+        if(argc > 1) {
+            cfg_file = argv[1];
+        }
+        Config& config = Config::instance();
+        bool res = config.load(cfg_file);
+        if(!res) {
+            std::cerr<<"load config failed "<<cfg_file<<std::endl;
+            return EXIT_FAILURE;
+        }
+
+        //const std::string logfile = config.getLogFile();
+        //bool debug = config.getLogLevel();
+        //logging_init(logfile, debug);
+    
+        // statsd
+        //bool statsd_enable = config.getStatsdEnable();
+        //statsd::enable(statsd_enable);
+        //if(statsd_enable) {
+        //    std::string statsd_addr = config.getStatsdAddr();
+        //    int32_t statsd_port = config.getStatsdPort();
+        //    std::string statsd_namespace = config.getStatsdNamespace();
+        //    statsd::set(statsd_addr, statsd_port, statsd_namespace);
+        //}
+        //// 统一日志
+        //int log_level = config.getXLogLevel();
+        //std::string service_name = config.getXLogName();
+        //bool xlog_enabled = config.getXLogEnabled();
+        //std::string xlog_addr = config.getXLogAddr();
+        //int xlog_port = config.getXLogPort();
+        //XLOGGING::XLOG_INIT(service_name, log_level, false, xlog_enabled, xlog_addr, xlog_port, false);
+
+        //int succ = Api::Init();
+        //if(succ != 0) {
+        //    LOG_ERROR<<"init failed";
+        //    return 3;
+        //}
+
+        //int32_t max_timeout = config.getWorkTaskMaxTimeout();
+        //int32_t wait = config.getWorkQueueThreadSleepTimeMs();
+        //int32_t work_queue_threads = config.getWorkQueueThreads();
+        //work_queue_threads = _MAX_(1, _MIN_(work_queue_threads, 1000));
+        //WorkQueuePtr _workQueues[1000];
+        //for(int i=0; i<work_queue_threads; i++) {
+        //    _workQueues[i] = new WorkQueue(i, wait, max_timeout);
+        //    _workQueues[i]->start();
+        //}
+   
+        std::thread http_thrd(run_http_service);
+        http_thrd.detach();
+
+        //LOG_INFO<<"system start";
+        Ice::PropertiesPtr properties = communicator()->getProperties();
+        Ice::ObjectAdapterPtr adapter = communicator()->createObjectAdapter(
+                                            properties->getProperty("AdapterIdentity"));
+        adapter->add(new SrvImpl, communicator()->stringToIdentity(
+                                            properties->getProperty("ServiceIdentity")));
+        adapter->activate();
+        communicator()->waitForShutdown();
+
+
+        //Api::Destroy();
+
+        //for(int i=0; i<work_queue_threads; i++) {
+        //    _workQueues[i]->destroy();
+        //    _workQueues[i]->getThreadControl().join();
+        //}
+ 
+        //LOG_INFO<<"system exit";
+
+        return EXIT_SUCCESS;
+    }
+
+private:
+};
+
+
+int main(int argc, char ** argv) {
+    IceServer application;
+    _exit(application.main(argc, argv));
+}
 
